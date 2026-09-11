@@ -7,7 +7,10 @@ authors = [
     { name = "Samuel Mapande", email = "mapandesamuel27@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+]
 
 [project.scripts]
 kache = "kache:main"
