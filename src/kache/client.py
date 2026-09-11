@@ -15,8 +15,11 @@ def main():
                 if message.lower() == "quit":
                     print("Closing connection...")
                     break
-                s.sendall(message.encode())
+                s.sendall((message + "\n").encode())
                 data = s.recv(1024)
+                if not data:
+                    print("Server closed the connection")
+                    break
                 print(f"\t{repr(data)}")
         except KeyboardInterrupt:
             print("Closing connection...")
