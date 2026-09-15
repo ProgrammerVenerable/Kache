@@ -1,6 +1,8 @@
 from .mylist import DLL
 from .node import Node
 import threading
+import traceback
+import time
 class Store:
     def __init__(self, capacity: int):
         self.capacity = capacity
@@ -37,16 +39,69 @@ class Store:
                 if command == "PUT":
                     return self._putter(parts)
 
+                if command == "TTL":
+                    return self._time_left(parts)
+
+                if command == "EXPIRE":
+                    return self._expire(parts)
+
+                if command == "PERSIST":
+                    return self._persist(parts)
+
                 return b"ERR unknown command\n"
 
             except Exception as e:
                 return f"ERR parsing_error {str(e)}\n".encode()
 
+    @staticmethod
+    def is_expired(node: Node) -> bool:
+        if node.expires_at is None:
+            return False
+
+        if time.time() >= node.expires_at:
+            return True
+
+        return False
+    
+    def _get_valid_node(self, key: str) -> Node | None:
+            """Returns the node if it exists and is not expired, cleaning it up if it is."""
+            if key not in self.kache:
+                return None
+                
+            node = self.kache[key]
+            if self.is_expired(node):
+                self._linked_list.remove(node)
+                del self.kache[key]
+                return None
+                
+            return node
+
     def _setter(self, parts: list[str]) -> bytes:
         """Creates a new entry in the dict and list"""
-        if len(parts) != 3:
-            return b"ERR syntax_error syntax: SET <key> <value>\n"
-        _, key, value = parts
+        if len(parts) != 3 and len(parts) != 5:
+            return b"ERR syntax_error syntax: SET <key> <value> [OPTIONAL] EX <time_in_seconds>\n"
+
+        # If it follows the optional syntax
+        if len(parts) == 5:
+            _, key, value, ex_flag, ttl_str = parts
+            # Checks if the flag used is actually EX
+            if ex_flag.upper() != "EX":
+                return b"ERR syntax_error syntax: SET <key> <value> [OPTIONAL] EX <time_in_seconds>\n"
+            # Then tries to convert it into a integer
+            try:
+                ttl = int(ttl_str)
+            except ValueError:
+                return b"ERR ttl must be an integer (seconds)\n"
+            
+            if ttl <= 0:
+                return b"ERR ttl must be a positive integer\n"
+            
+        else:
+            _, key, value = parts
+
+        if self._get_valid_node(key) is not None:
+            return b"ERR Key already in use\n"
+
         if key in self.kache:
             return b"ERR Key already in use\n"
 
@@ -55,8 +110,12 @@ class Store:
             ev_key = self._linked_list.evict()
             del self.kache[ev_key]
             notify = f"MAX CAPACITY REACHED, LRU eviction applied '{ev_key}' REMOVED!\n"
-        
-        self.kache[key] = self._linked_list.insert(Node(key, value))
+
+        if len(parts) == 5:
+            node = Node(key, value, ttl)
+        else:
+            node = Node(key, value)
+        self.kache[key] = self._linked_list.insert(node)
         response = "OK\n" + notify
         return response.encode()
 
@@ -71,7 +130,8 @@ class Store:
         if key == "/all":
             return f"{self._linked_list}".encode()
 
-        if key not in self.kache:
+        node = self._get_valid_node(key)
+        if not node:
             return b"ERR key not found\n"
 
         node: Node = self._linked_list.touch(self.kache[key])
@@ -85,7 +145,8 @@ class Store:
             return b"ERR syntax_error syntax: PUT <key> <value>\n"
 
         _, key, value = parts
-        if key not in self.kache:
+        node = self._get_valid_node(key)
+        if not node:
             return b"ERR key not found\n"
         
         self.kache[key] = self._linked_list.touch(self.kache[key], value)
@@ -97,9 +158,67 @@ class Store:
             return b"ERR syntax_error syntax: DEL <key>\n"
 
         _, key = parts
-        if key not in self.kache:
+        if self._get_valid_node(key) is None:
             return b"ERR key not found\n"
 
         self._linked_list.remove(self.kache[key])
         del self.kache[key]
+        return b"OK\n"
+
+    def _time_left(self, parts: list[str]) -> bytes:
+        """Shows how much time is left before a key expires"""
+        if len(parts) != 2:
+            return b"ERR syntax_error syntax: TTL <key>\n"
+
+        _, key = parts
+        if key not in self.kache:
+            return b"ERR key not found\n"
+
+        node = self.kache[key]
+        if node.expires_at is None:
+            return b"Node is permanent\n"
+
+        remaining = node.expires_at - time.time()
+        if remaining <= 0:
+            # already expired but not yet lazily cleaned up
+            self._linked_list.remove(node)
+            del self.kache[key]
+            return b"ERR key not found\n"
+
+        return f"{remaining:.0f} seconds\n".encode()
+
+    def _expire(self, parts: list[str]) -> bytes:
+        """Edits the expires_at field of any node"""
+        if len(parts) != 3:
+            return b"ERR syntax_error syntax: EXPIRE <key> <time_in_seconds>\n"
+
+        _, key, ttl_str = parts
+        node = self._get_valid_node(key)
+        if not node:
+            return b"ERR key not found\n"
+   
+        try:
+            ttl = int(ttl_str)
+        except ValueError:
+            return b"ERR ttl must be an integer (seconds)\n"
+            
+        if ttl <= 0:
+            return b"ERR ttl must be a positive integer\n"
+        node.expires_at = time.time() + ttl
+        return b"OK\n"
+
+    def _persist(self, parts: list[str]) -> bytes:
+        """Makes a node permanent with no expiry"""
+        if len(parts) != 2:
+            return b"ERR syntax_error syntax: TTL <key>\n"
+
+        _, key = parts
+        node = self._get_valid_node(key)
+        if not node:
+            return b"ERR key not found\n"
+   
+        if node.expires_at is None:
+            return b"Node is already permanent\n"
+
+        node.expires_at = None
         return b"OK\n"
