@@ -4,13 +4,19 @@ import threading
 import traceback
 import time
 class Store:
-    def __init__(self, capacity: int):
+    def __init__(self, capacity: int, cleanup_interval = 5):
         self.capacity = capacity
         if capacity <= 0:
             raise ValueError("capacity must be greater than 0")
         self.kache: dict[str, Node] = {}
         self._linked_list = DLL()
         self._lock = threading.Lock()
+
+        self._cleanup_interval = cleanup_interval
+        self._stop_event = threading.Event()
+
+        self._cleanup_thread = threading.Thread(target=self._cleanup_worker, daemon=True) #so when the main program dies it dies too
+        self._cleanup_thread.start()
 
     def parse(self, text_line: bytes) -> bytes:
         """Parses the raw incoming bytes and executes the command"""
@@ -51,7 +57,42 @@ class Store:
                 return b"ERR unknown command\n"
 
             except Exception as e:
+                traceback.print_exc()
                 return f"ERR parsing_error {str(e)}\n".encode()
+
+    def _cleanup_worker(self):
+        """Runs in the background and periodically triggers a cleanup sweep."""
+
+        # Loop until the stop event is set
+        while not self._stop_event.is_set():
+
+            # Wait acts like time.sleep(), but can be interrupted instantly
+            self._stop_event.wait(self._cleanup_interval)
+
+            if not self._stop_event.is_set():
+                self._sweep_expired_keys()
+
+    def _sweep_expired_keys(self):
+        """Iterates through the cache and removes expired keys thread-safely."""
+
+        # By wrapping the iteration in with self._lock:, 
+        # you guarantee that a user isn't halfway through a GET or SET operation 
+        # while the cleaner is deleting nodes.
+        with self._lock:
+            # We must use list() to create a copy of the keys. 
+            # Modifying a dictionary's size while iterating over it throws a RuntimeError.
+            keys = list(self.kache.keys())
+
+            for key in keys:
+                node = self.kache[key]
+                if self.is_expired(node):
+                    self._evict_key(node.key)
+
+    def shutdown(self):
+        """Signals the background thread to stop and waits for it to finish."""
+        self._stop_event.set()
+        if self._cleanup_thread.is_alive():
+            self._cleanup_thread.join()
 
     @staticmethod
     def is_expired(node: Node) -> bool:
@@ -70,11 +111,14 @@ class Store:
                 
             node = self.kache[key]
             if self.is_expired(node):
-                self._linked_list.remove(node)
-                del self.kache[key]
+                self._evict_key(key)
                 return None
                 
             return node
+    def _evict_key(self, key):
+        node = self.kache[key]
+        self._linked_list.remove(node)
+        del self.kache[key]
 
     def _setter(self, parts: list[str]) -> bytes:
         """Creates a new entry in the dict and list"""
@@ -100,9 +144,6 @@ class Store:
             _, key, value = parts
 
         if self._get_valid_node(key) is not None:
-            return b"ERR Key already in use\n"
-
-        if key in self.kache:
             return b"ERR Key already in use\n"
 
         notify = ""
@@ -161,8 +202,7 @@ class Store:
         if self._get_valid_node(key) is None:
             return b"ERR key not found\n"
 
-        self._linked_list.remove(self.kache[key])
-        del self.kache[key]
+        self._evict_key(key)
         return b"OK\n"
 
     def _time_left(self, parts: list[str]) -> bytes:
@@ -171,20 +211,14 @@ class Store:
             return b"ERR syntax_error syntax: TTL <key>\n"
 
         _, key = parts
-        if key not in self.kache:
+        node = self._get_valid_node(key)
+        if node is None:
             return b"ERR key not found\n"
 
-        node = self.kache[key]
         if node.expires_at is None:
             return b"Node is permanent\n"
 
         remaining = node.expires_at - time.time()
-        if remaining <= 0:
-            # already expired but not yet lazily cleaned up
-            self._linked_list.remove(node)
-            del self.kache[key]
-            return b"ERR key not found\n"
-
         return f"{remaining:.0f} seconds\n".encode()
 
     def _expire(self, parts: list[str]) -> bytes:

@@ -1,10 +1,15 @@
 import pytest
 from ..store import Store
+import time
 
 @pytest.fixture
 def store():
-    """Returns a fresh store with a capacity of 3 before every test"""
-    return Store(3)
+    """Returns a fresh store with a capacity of 3 before every test 
+    with a fast cleanup interval for testing.
+    Crucially, ensures the background thread is shut down after each test."""
+    s = Store(capacity=3, cleanup_interval=0.1)
+    yield s
+    s.shutdown()
 
 def test_store_initialization(store: Store):
     """Ensures the store starts with the correct capacity and an empty dictionary."""
@@ -20,8 +25,8 @@ def test_parse_bad_cmds(store: Store):
     assert store.parse(b"do my homework") == b"ERR unknown command\n"
     
     # Should catch syntax errors (missing or extra arguments)
-    assert store.parse(b"set car") == b"ERR syntax_error syntax: SET <key> <value>\n"
-    assert store.parse(b"set car toyoya model corolla") == b"ERR syntax_error syntax: SET <key> <value>\n"
+    assert store.parse(b"set car") == b"ERR syntax_error syntax: SET <key> <value> [OPTIONAL] EX <time_in_seconds>\n"
+    assert store.parse(b"set car toyoya model corolla") == b"ERR syntax_error syntax: SET <key> <value> [OPTIONAL] EX <time_in_seconds>\n"
     
     # Should catch missing keys
     assert store.parse(b"get name") == b"ERR key not found\n"
@@ -122,3 +127,82 @@ def test_lru_put_prevents_eviction(store: Store):
     assert "B" not in store.kache
     assert store.parse(b"GET A") == b"99\n"
     assert store.parse(b"GET C") == b"3\n"
+
+# ==========================================
+# TTL & EXPIRATION TESTS
+# ==========================================
+
+def test_ttl_parsing_errors(store: Store):
+    """Ensures bad TTL syntax is caught by the parser."""
+    # Bad EX flag
+    assert store.parse(b"SET A 1 IN 5") == b"ERR syntax_error syntax: SET <key> <value> [OPTIONAL] EX <time_in_seconds>\n"
+    
+    # Non-integer TTL
+    assert store.parse(b"SET A 1 EX five") == b"ERR ttl must be an integer (seconds)\n"
+    
+    # Negative or Zero TTL
+    assert store.parse(b"SET A 1 EX 0") == b"ERR ttl must be a positive integer\n"
+    assert store.parse(b"EXPIRE A -5") == b"ERR key not found\n" # Because A isn't set yet
+
+def test_lazy_expiration(store: Store):
+    """Tests if GET correctly identifies an expired key and deletes it."""
+    store.parse(b"SET A 1 EX 1")
+    
+    # Immediately accessible
+    assert store.parse(b"GET A") == b"1\n"
+    
+    # Wait for the TTL to expire
+    time.sleep(1.1)
+    
+    # GET should now trigger the lazy deletion and return not found
+    assert store.parse(b"GET A") == b"ERR key not found\n"
+    assert "A" not in store.kache
+
+def test_ttl_command(store: Store):
+    """Tests the TTL command for both temporary and permanent keys."""
+    store.parse(b"SET temp 99 EX 5")
+    store.parse(b"SET perm 100")
+    
+    # Check temporary key (should be 5 seconds)
+    ttl_response = store.parse(b"TTL temp")
+    assert ttl_response == b"5 seconds\n" or ttl_response == b"4 seconds\n"
+    
+    # Check permanent key
+    assert store.parse(b"TTL perm") == b"Node is permanent\n"
+
+def test_expire_and_persist_commands(store: Store):
+    """Tests modifying the lifespan of an existing key."""
+    store.parse(b"SET mykey val")
+    
+    # 1. Apply a TTL to a permanent key
+    assert store.parse(b"EXPIRE mykey 1") == b"OK\n"
+    
+    # Verify it was applied
+    ttl_res = store.parse(b"TTL mykey")
+    assert b"seconds" in ttl_res
+    
+    # 2. Make it permanent again before it dies
+    assert store.parse(b"PERSIST mykey") == b"OK\n"
+    assert store.parse(b"TTL mykey") == b"Node is permanent\n"
+    
+    # 3. Wait 1.1 seconds. Since it is persistent, it should survive.
+    time.sleep(1.1)
+    assert store.parse(b"GET mykey") == b"val\n"
+
+def test_background_sweeper(store: Store):
+    """
+    Tests active expiration. Proves the background thread deletes 
+    expired keys even if the client never calls GET.
+    """
+    store.parse(b"SET ghost boo EX 1")
+    
+    # Prove it's in the underlying dictionary
+    assert "ghost" in store.kache
+    
+    # Sleep long enough for the key to expire AND the background 
+    # thread to wake up (cleanup_interval is 0.1s in our fixture)
+    time.sleep(1.2)
+    
+    # Check the dictionary directly. We are NOT calling store.parse("GET ghost"),
+    # which proves the background thread did the cleanup, not lazy deletion!
+    assert "ghost" not in store.kache

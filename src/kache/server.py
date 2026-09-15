@@ -17,7 +17,7 @@ def handle_clients(conn: socket.socket, addr, kache: Store):
             buffer += data
             while b"\n" in buffer:
                 line, buffer = buffer.split(b"\n", 1)
-                print(f"Received from {addr}: {data!r}")
+                print(f"Received from {addr}: {line!r}")
                 conn.sendall(kache.parse(line))
 
 def main():
@@ -36,6 +36,13 @@ def main():
                 thread.start()
         except KeyboardInterrupt:
             print("\nShutting down server...")
+
+        finally:
+            # This block ALWAYS runs before the program exits,
+            # even if an unexpected exception crashed the 'while' loop!
+            print("Cleaning up cache background threads...")
+            kache.shutdown()
+            print("Shutdown complete. Goodbye!")
 
 if __name__ == "__main__":
     main()
