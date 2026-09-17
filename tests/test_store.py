@@ -1,5 +1,5 @@
 import pytest
-from ..store import Store
+from kache.store import Store
 import time
 import os
 

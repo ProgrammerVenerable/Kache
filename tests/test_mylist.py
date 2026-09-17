@@ -1,6 +1,6 @@
 import pytest
-from ..mylist import DLL
-from ..node import Node
+from kache.mylist import DLL
+from kache.node import Node
 
 def test_dll_initialization():
     dll = DLL()

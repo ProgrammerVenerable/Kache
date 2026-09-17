@@ -5,9 +5,9 @@ from unittest.mock import MagicMock, call
 import socket
 import time
 
-from ..server import main
-from ..store import Store
-from ..server import handle_clients
+from kache.server import main
+from kache.store import Store
+from kache.server import handle_clients
 
 # ==========================================
 # 1. THREAD SAFETY TESTS

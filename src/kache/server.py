@@ -2,9 +2,6 @@ import socket
 import threading
 from .store import Store
 
-HOST = ''
-PORT = 6767
-
 def handle_clients(conn: socket.socket, addr, kache: Store):
     print(f"Connected by {addr}")
     buffer = b""
@@ -20,10 +17,10 @@ def handle_clients(conn: socket.socket, addr, kache: Store):
                 print(f"Received from {addr}: {line!r}")
                 conn.sendall(kache.parse(line))
 
-def main():
+def main(host='', port=6767):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((HOST, PORT))
+        s.bind((host, port))
         s.listen()
         kache = Store(10)
         try:
