@@ -1,13 +1,14 @@
 import pytest
 from ..store import Store
 import time
+import os
 
 @pytest.fixture
 def store():
     """Returns a fresh store with a capacity of 3 before every test 
     with a fast cleanup interval for testing.
     Crucially, ensures the background thread is shut down after each test."""
-    s = Store(capacity=3, cleanup_interval=0.1)
+    s = Store(capacity=3, cleanup_interval=0.1, save_file=None)
     yield s
     s.shutdown()
 
@@ -311,10 +312,10 @@ def test_expired_key_does_not_consume_capacity(store):
 
 def test_invalid_capacity():
     with pytest.raises(ValueError):
-        Store(0)
+        Store(0, save_file=None)
 
     with pytest.raises(ValueError):
-        Store(-1)
+        Store(-1, save_file=None)
 
 def test_persist_permanent_key(store):
     store.parse(b"SET A 1")
@@ -372,3 +373,110 @@ def test_unicode_values(store):
 def test_unicode_key(store):
     assert store.parse("SET prénom Samuel".encode()) == b"OK\n"
     assert store.parse("GET prénom".encode()) == "Samuel\n".encode()
+
+# ==========================================
+# PERSISTENCE & SNAPSHOT TESTS
+# ==========================================
+
+def test_basic_save_and_load(tmp_path):
+    """Tests that keys and values survive a server restart."""
+    save_file = str(tmp_path / "save.json")
+    
+    # --- SERVER 1 (Start, Add Data, Shutdown) ---
+    store1 = Store(capacity=5, save_file=save_file)
+    store1.parse(b"SET user1 alice")
+    store1.parse(b"SET user2 bob")
+    store1.shutdown() # Forces the snapshot thread to write to disk
+    
+    assert os.path.exists(save_file) # Ensure the file was actually created
+
+    # --- SERVER 2 (Start, Read Data, Verify) ---
+    store2 = Store(capacity=5, save_file=save_file)
+    
+    try:
+        assert store2.parse(b"GET user1") == b"alice\n"
+        assert store2.parse(b"GET user2") == b"bob\n"
+    finally:
+        store2.shutdown()
+
+def test_empty_cache_overwrites_old_save(tmp_path):
+    """Tests the bugfix where deleting all keys correctly saves an empty file."""
+    save_file = str(tmp_path / "save.json")
+    
+    # 1. Start store and put data in it
+    store1 = Store(capacity=5, save_file=save_file)
+    store1.parse(b"SET A 1")
+    store1.shutdown()
+    
+    # 2. Start store again, delete everything, shut down
+    store2 = Store(capacity=5, save_file=save_file)
+    store2.parse(b"DEL A") # Cache is now completely empty
+    store2.shutdown()
+    
+    # 3. Start store a third time, verify zombie keys didn't come back
+    store3 = Store(capacity=5, save_file=save_file)
+    try:
+        assert len(store3.kache) == 0
+        assert store3.parse(b"GET A") == b"ERR key not found\n"
+    finally:
+        store3.shutdown()
+
+def test_offline_expiration(tmp_path):
+    """Tests that keys which expire while the server is turned off are rejected on boot."""
+    save_file = str(tmp_path / "save.json")
+    
+    store1 = Store(capacity=5, save_file=save_file)
+    store1.parse(b"SET milk 1 EX 1")    # Dies in 1 second
+    store1.parse(b"SET honey 1 EX 10")  # Dies in 10 seconds
+    store1.parse(b"SET salt 1")         # Never dies
+    store1.shutdown()
+    
+    # Simulate the server being offline for 1.1 seconds
+    time.sleep(1.1)
+    
+    store2 = Store(capacity=5, save_file=save_file)
+    try:
+        # Milk should be gone because it expired while the server was off
+        assert store2.parse(b"GET milk") == b"ERR key not found\n"
+        assert "milk" not in store2.kache
+        
+        # Honey and salt should still be there
+        assert store2.parse(b"GET honey") == b"1\n"
+        assert store2.parse(b"GET salt") == b"1\n"
+    finally:
+        store2.shutdown()
+
+def test_lru_order_is_preserved_on_load(tmp_path):
+    """Tests that loading from disk perfectly restores the MRU/LRU state."""
+    save_file = str(tmp_path / "save.json")
+    
+    store1 = Store(capacity=3, save_file=save_file)
+    store1.parse(b"SET A 1")
+    store1.parse(b"SET B 2")
+    store1.parse(b"SET C 3")
+    
+    # Touch A to make it the Most Recently Used. 
+    # Current order from MRU to LRU should be: A -> C -> B
+    store1.parse(b"GET A")
+    store1.shutdown()
+    
+    store2 = Store(capacity=3, save_file=save_file)
+    try:
+        # Add D. If the LRU order loaded correctly, B (the LRU) should be evicted.
+        response = store2.parse(b"SET D 4")
+        assert b"'B' REMOVED!" in response
+        
+        # Verify B is gone, but A, C, and D remain
+        assert "B" not in store2.kache
+        assert "A" in store2.kache 
+    finally:
+        store2.shutdown()
+
+def test_persistence_disabled(tmp_path):
+    """Tests that setting save_file=None completely disables disk writes."""
+    store1 = Store(capacity=5, save_file=None)
+    store1.parse(b"SET A 1")
+    store1.shutdown()
+    
+    # Verify no save.json was dumped into the current working directory
+    assert not os.path.exists("save.json")

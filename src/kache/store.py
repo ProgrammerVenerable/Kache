@@ -1,22 +1,32 @@
 from .mylist import DLL
 from .node import Node
+import json
+import os
+import tempfile
 import threading
 import traceback
 import time
 class Store:
-    def __init__(self, capacity: int, cleanup_interval = 5):
+    def __init__(self, capacity: int, cleanup_interval = 5, save_file = 'save.json'):
         self.capacity = capacity
         if capacity <= 0:
             raise ValueError("capacity must be greater than 0")
         self.kache: dict[str, Node] = {}
         self._linked_list = DLL()
         self._lock = threading.Lock()
+        self.save_file = save_file 
+        if self.save_file:
+            self._load_snapshot()
+        self._snapshot_trigger_event = threading.Event()
+        self._snapshot_stop_event = threading.Event()
+        self._snapshot_thread = threading.Thread(target=self._snapshot, daemon=True)
 
         self._cleanup_interval = cleanup_interval
         self._stop_event = threading.Event()
 
         self._cleanup_thread = threading.Thread(target=self._cleanup_worker, daemon=True) #so when the main program dies it dies too
         self._cleanup_thread.start()
+        self._snapshot_thread.start()
 
     def parse(self, text_line: bytes) -> bytes:
         """Parses the raw incoming bytes and executes the command"""
@@ -60,6 +70,90 @@ class Store:
                 traceback.print_exc()
                 return f"ERR parsing_error {str(e)}\n".encode()
 
+    def _snapshot(self):
+        """Saves a snapshot of hte dictionary to disk"""
+        if not self.save_file:
+            return
+        while not self._snapshot_stop_event.is_set():
+
+            # Wait for either a manual trigger or a timer
+            self._snapshot_trigger_event.wait(300)
+            # if manual, should always clear to prevent infinite writes
+            self._snapshot_trigger_event.clear()
+
+
+            data_to_save = []
+            with self._lock:
+                current_node = self._linked_list.head_sentinel.next
+
+                while current_node != self._linked_list.tail_sentinel:
+                    data_to_save.append({
+                        "key": current_node.key,
+                        "value": current_node.value,
+                        "expires_at": current_node.expires_at
+                    })
+
+                    current_node = current_node.next
+
+            # Perform file I/O outside the lock so cache operations aren't blocked
+            try:
+                save_dir = os.path.dirname(self.save_file) or '.'
+
+                # Write to a temporary file first, then atomically replace the old save
+                # This prevents a corrupted save.json if the server crashes mid-write
+                with tempfile.NamedTemporaryFile('w', delete=False, dir=save_dir) as tmp:
+                    json.dump(data_to_save, tmp)
+                    temp_name = tmp.name
+
+                os.replace(temp_name, self.save_file)
+
+            except Exception:
+                traceback.print_exc()
+                # Clean up the orphan temp file if something failed before the replace
+                if 'temp_name' in locals() and os.path.exists(temp_name):
+                    os.remove(temp_name)
+
+            if self._snapshot_stop_event.is_set():
+                break
+
+    def _load_snapshot(self):
+        """Loads the snapshot from disk on startup."""
+
+        # If save doesn't exist, it is the first run, so return
+        if not self.save_file or not os.path.exists(self.save_file):
+            return
+
+        with self._lock:
+            try:
+                with open(self.save_file, 'r') as f:
+                    saved_data = json.load(f)
+
+                # We iterate backwards (from Least Recently Used to Most Recently Used).
+                # If your standard DLL insertion puts new items at the 'head' (MRU),
+                # inserting them in reverse order ensures the true MRU ends up at the head.
+
+                for item in reversed(saved_data):
+                    key = item["key"]
+                    value = item["value"]
+                    expires_at = item["expires_at"]
+
+                    node = Node(key=key, value=value)
+                    if expires_at is not None:
+                        node.expires_at = expires_at
+                        
+                    # If a node expired while the server was offline remove/ignore it
+                    if self.is_expired(node):
+                        continue
+
+                    self.kache[key] = node
+                    self._linked_list.insert(node)
+
+            except json.JSONDecodeError:
+                print("ERR: save.json is corrupted. Starting with empty cache.")
+            except Exception as e:
+                traceback.print_exc()
+
+
     def _cleanup_worker(self):
         """Runs in the background and periodically triggers a cleanup sweep."""
 
@@ -91,11 +185,16 @@ class Store:
     def shutdown(self):
         """Signals the background thread to stop and waits for it to finish."""
         self._stop_event.set()
+        self._snapshot_stop_event.set() 
+        self._snapshot_trigger_event.set() # <-- wakes wait() immediately instead of waiting up to 300s
         if self._cleanup_thread.is_alive():
             self._cleanup_thread.join()
+        if self._snapshot_thread.is_alive():
+            self._snapshot_thread.join()
 
     @staticmethod
     def is_expired(node: Node) -> bool:
+        """Checks if a node has expired"""
         if node.expires_at is None:
             return False
 
@@ -218,7 +317,7 @@ class Store:
         if node.expires_at is None:
             return b"Node is permanent\n"
 
-        remaining = node.expires_at - time.time()
+        remaining = remaining = int(node.expires_at - time.time())
         return f"{remaining:.0f} seconds\n".encode()
 
     def _expire(self, parts: list[str]) -> bytes:
@@ -238,6 +337,7 @@ class Store:
             
         if ttl <= 0:
             return b"ERR ttl must be a positive integer\n"
+        node: Node = self._linked_list.touch(self.kache[key])
         node.expires_at = time.time() + ttl
         return b"OK\n"
 
@@ -254,5 +354,6 @@ class Store:
         if node.expires_at is None:
             return b"Node is already permanent\n"
 
+        node: Node = self._linked_list.touch(self.kache[key])
         node.expires_at = None
         return b"OK\n"
