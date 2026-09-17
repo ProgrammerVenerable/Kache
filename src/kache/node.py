@@ -6,7 +6,6 @@ class Node:
         self.value: Any = value
         self.prev: Node = None
         self.next: Node = None
-        self.time_to_live = ttl
         self.expires_at = (time.time() + ttl) if ttl is not None else None
         
 

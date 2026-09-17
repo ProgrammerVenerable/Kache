@@ -64,6 +64,17 @@ def test_dll_multipe_insert():
         ("age", 19),
         ("name", "sam")
     ]
+def test_remove_only_node():
+    """Removes only one node to verify HEAD ⇄ TAIL"""
+    dll = DLL()
+    node = Node("A", 1)
+
+    dll.insert(node)
+    dll.remove(node)
+
+    assert dll.head_sentinel.next == dll.tail_sentinel
+    assert dll.tail_sentinel.prev == dll.head_sentinel
+    assert str(dll) == "Empty List"
 
 def test_dll_remove():
     """Tests if remove works"""
@@ -114,6 +125,26 @@ def test_dll_multiple_removes():
         ("age", 19)
     ]
 
+def test_remove_head_node():
+    dll = DLL()
+
+    n1 = Node("A", 1)
+    n2 = Node("B", 2)
+    n3 = Node("C", 3)
+
+    dll.insert(n1)
+    dll.insert(n2)
+    dll.insert(n3)
+
+    dll.remove(n3)
+
+    assert dll.head_sentinel.next == n2
+    assert n2.prev == dll.head_sentinel
+    assert list(dll) == [
+        ("B", 2),
+        ("A", 1)
+    ]
+
 def test_dll_touch():
     """Checks if accessing a node will change it to most 
     recently accessed/or the node after the head"""
@@ -158,6 +189,49 @@ def test_dll_touch():
             ("favourite manhwa", "Absolute Regression"),
             ("age", 19)
         ]
+def test_touch_head():
+    """Checks if nothing unexpexted happens why you touch the MRU"""
+    dll = DLL()
+
+    n1 = Node("A", 1)
+    n2 = Node("B", 2)
+
+    dll.insert(n1)
+    dll.insert(n2)
+
+    dll.touch(n2)
+
+    assert list(dll) == [
+        ("B", 2),
+        ("A", 1)
+    ]
+
+    assert dll.head_sentinel.next == n2
+    assert dll.tail_sentinel.prev == n1
+
+def test_touch_tail():
+    dll = DLL()
+
+    n1 = Node("A", 1)
+    n2 = Node("B", 2)
+    n3 = Node("C", 3)
+
+    dll.insert(n1)
+    dll.insert(n2)
+    dll.insert(n3)
+
+    assert dll.tail_sentinel.prev == n1
+
+    dll.touch(n1)
+
+    assert dll.head_sentinel.next == n1
+    assert dll.tail_sentinel.prev == n2
+
+    assert list(dll) == [
+        ("A", 1),
+        ("C", 3),
+        ("B", 2)
+    ]
 
 def test_touch_updates_value():
     """Tests if using touch with value updates the nodes value"""

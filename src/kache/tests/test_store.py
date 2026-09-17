@@ -128,6 +128,65 @@ def test_lru_put_prevents_eviction(store: Store):
     assert store.parse(b"GET A") == b"99\n"
     assert store.parse(b"GET C") == b"3\n"
 
+
+def test_put_updates_lru_order(store):
+    store.parse(b"SET A 1")
+    store.parse(b"SET B 2")
+    store.parse(b"SET C 3")
+
+    store.parse(b"PUT A 99")
+
+    assert list(store._linked_list) == [
+        ("A", "99"),
+        ("C", "3"),
+        ("B", "2")
+    ]
+
+def test_get_updates_lru_order(store):
+    store.parse(b"SET A 1")
+    store.parse(b"SET B 2")
+    store.parse(b"SET C 3")
+
+    store.parse(b"GET A")
+
+    assert list(store._linked_list) == [
+        ("A", "1"),
+        ("C", "3"),
+        ("B", "2")
+    ]
+
+def test_dict_and_dll_stay_in_sync(store):
+    store.parse(b"SET A 1")
+    store.parse(b"SET B 2")
+    store.parse(b"SET C 3")
+
+    assert set(store.kache.keys()) == {
+        key for key, value in store._linked_list
+    }
+
+    store.parse(b"DEL B")
+
+    assert set(store.kache.keys()) == {
+        key for key, value in store._linked_list
+    }
+
+    store.parse(b"SET D 4")
+
+    assert set(store.kache.keys()) == {
+        key for key, value in store._linked_list
+    }
+
+def test_put_preserves_ttl(store):
+    store.parse(b"SET A 1 EX 2")
+
+    original_expiry = store.kache["A"].expires_at
+
+    time.sleep(0.1)
+
+    store.parse(b"PUT A 999")
+
+    assert store.kache["A"].expires_at == original_expiry
+
 # ==========================================
 # TTL & EXPIRATION TESTS
 # ==========================================
@@ -203,6 +262,113 @@ def test_background_sweeper(store: Store):
     # thread to wake up (cleanup_interval is 0.1s in our fixture)
     time.sleep(1.2)
     
-    # Check the dictionary directly. We are NOT calling store.parse("GET ghost"),
+    # Checks the dictionary directly. We are NOT calling store.parse("GET ghost"),
     # which proves the background thread did the cleanup, not lazy deletion!
     assert "ghost" not in store.kache
+
+def test_expire_resets_existing_ttl(store):
+    store.parse(b"SET A 1 EX 10")
+
+    old_expiry = store.kache["A"].expires_at
+
+    time.sleep(0.1)
+
+    store.parse(b"EXPIRE A 30")
+
+    new_expiry = store.kache["A"].expires_at
+
+    assert new_expiry > old_expiry
+
+def test_expired_key_cannot_be_put(store):
+    store.parse(b"SET A 1 EX 1")
+
+    time.sleep(1.1)
+
+    assert store.parse(b"PUT A 2") == b"ERR key not found\n"
+    assert "A" not in store.kache
+
+def test_expired_key_cannot_be_deleted(store):
+    store.parse(b"SET A 1 EX 1")
+
+    time.sleep(1.1)
+
+    assert store.parse(b"DEL A") == b"ERR key not found\n"
+    assert "A" not in store.kache
+
+def test_expired_key_does_not_consume_capacity(store):
+    store.parse(b"SET A 1 EX 1")
+    store.parse(b"SET B 2")
+    store.parse(b"SET C 3")
+
+    time.sleep(1.1)
+
+    store.parse(b"SET D 4")
+
+    assert "A" not in store.kache
+    assert "B" in store.kache
+    assert "C" in store.kache
+    assert "D" in store.kache
+
+def test_invalid_capacity():
+    with pytest.raises(ValueError):
+        Store(0)
+
+    with pytest.raises(ValueError):
+        Store(-1)
+
+def test_persist_permanent_key(store):
+    store.parse(b"SET A 1")
+
+    assert store.parse(b"PERSIST A") == b"Node is already permanent\n"
+
+def test_expire_invalid_ttl(store):
+    store.parse(b"SET A 1")
+
+    assert store.parse(b"EXPIRE A 0") == (
+        b"ERR ttl must be a positive integer\n"
+    )
+
+    assert store.parse(b"EXPIRE A -5") == (
+        b"ERR ttl must be a positive integer\n"
+    )
+
+    assert store.parse(b"EXPIRE A five") == (
+        b"ERR ttl must be an integer (seconds)\n"
+    )
+
+def assert_store_consistent(store):
+    dll_keys = [key for key, _ in store._linked_list]
+
+    assert set(dll_keys) == set(store.kache.keys())
+    assert len(dll_keys) == len(set(dll_keys))
+    assert len(store.kache) <= store.capacity
+
+    for key in dll_keys:
+        assert store.kache[key].key == key
+
+def test_cache_consistency(store):
+    store.parse(b"SET A 1")
+    store.parse(b"SET B 2")
+    store.parse(b"SET C 3")
+
+    assert_store_consistent(store)
+
+    store.parse(b"GET A")
+    assert_store_consistent(store)
+
+    store.parse(b"PUT B 20")
+    assert_store_consistent(store)
+
+    store.parse(b"DEL C")
+    assert_store_consistent(store)
+
+    store.parse(b"SET D 4")
+    assert_store_consistent(store)
+
+def test_unicode_values(store):
+    assert store.parse("SET greeting こんにちは".encode()) == b"OK\n"
+    assert store.parse("GET greeting".encode()) == "こんにちは\n".encode()
+
+def test_unicode_key(store):
+    assert store.parse("SET prénom Samuel".encode()) == b"OK\n"
+    assert store.parse("GET prénom".encode()) == "Samuel\n".encode()

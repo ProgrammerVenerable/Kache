@@ -244,7 +244,7 @@ class Store:
     def _persist(self, parts: list[str]) -> bytes:
         """Makes a node permanent with no expiry"""
         if len(parts) != 2:
-            return b"ERR syntax_error syntax: TTL <key>\n"
+            return b"ERR syntax_error syntax: PERSIST <key>\n"
 
         _, key = parts
         node = self._get_valid_node(key)
