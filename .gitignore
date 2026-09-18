@@ -14,3 +14,6 @@ wheels/
 .coverage
 htmlcov/
 coverage.xml
+
+# save files
+save.json
